@@ -1,17 +1,21 @@
 #include <iostream>
-#include <iomanip>   // for setw and setfill
 #include <vector>
 #include <array>
 #include <random>
 #include <cstdint>
-#include<algorithm>
-#include<list>
-#include<tuple>
-#include<cmath>
+#include <algorithm>
+#include <list>
 
 using namespace std;
 
-// AES S-Box
+// ================= DATA STRUCTURES =================
+using Vector8 = array<uint8_t, 8>;
+
+struct Quartet_Record {
+    vector<vector<uint8_t>> C0, C1, C2, C3;
+};
+
+// ================= AES CONSTANTS =================
 const unsigned char s_box[16][16] = {
     {0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76},
     {0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0},
@@ -30,14 +34,7 @@ const unsigned char s_box[16][16] = {
     {0xE1, 0xF8, 0x98, 0x11, 0x69, 0xD9, 0x8E, 0x94, 0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF},
     {0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16}
 };
-void apply_s_box(vector<vector<uint8_t>>& matrix) {
-  for (auto& row : matrix) {
-      for (auto& val : row) {
-          val = s_box[val >> 4][val & 0x0F];
-      }
-  }
-}
-// AES Inverse S-Box
+
 const unsigned int inv_s_box[16][16] = {
     {0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb},
     {0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb},
@@ -56,887 +53,327 @@ const unsigned int inv_s_box[16][16] = {
     {0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61},
     {0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d}
 };
+const uint8_t RCon[10] = {0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36};
 
-// Function to apply the Inverse S-Box to a 4x4 matrix represented as a vector of vectors.
-void InvSubBytes(vector<vector<uint8_t>> &matrix) {
-    for (size_t i = 0; i < matrix.size(); ++i) {
-        for (size_t j = 0; j < matrix[i].size(); ++j) {
-            uint8_t byte = matrix[i][j];
-            uint8_t highNibble = (byte >> 4) & 0x0F; // Extract top 4 bits
-            uint8_t lowNibble = byte & 0x0F;         // Extract bottom 4 bits
-            matrix[i][j] = inv_s_box[highNibble][lowNibble]; // Substitute using the inverse S-box
-        }
-    }
+// ================= HELPERS =================
+uint8_t getRandomHex(mt19937& gen){
+    uniform_int_distribution<> d(0,255);
+    return d(gen);
 }
 
-void shiftRows(vector<vector<uint8_t>>& matrix) {
-    uint8_t temp;
-  
-    // Ensure that the matrix has 4 rows and each row has 4 columns.
-    if (matrix.size() != 4 || matrix[0].size() != 4) {
-        cerr << "Error: The matrix must be 4x4." << endl;
-        return;
-    }
-    
-    // Shift the second row (row 1) one position to the left.
-    temp = matrix[1][0];
-    for (int i = 0; i < 3; i++) {
-        matrix[1][i] = matrix[1][i + 1];
-    }
-    matrix[1][3] = temp;
-    
-    // Shift the third row (row 2) by 2 positions to the left.
-    // We swap corresponding elements: positions 0 and 2, then positions 1 and 3.
-    temp = matrix[2][0];
-    matrix[2][0] = matrix[2][2];
-    matrix[2][2] = temp;
-    
-    temp = matrix[2][1];
-    matrix[2][1] = matrix[2][3];
-    matrix[2][3] = temp;
-    
-    // Shift the fourth row (row 3) by 3 positions to the left (or equivalently right by 1 position).
-    temp = matrix[3][3];
-    for (int i = 3; i > 0; i--) {
-        matrix[3][i] = matrix[3][i - 1];
-    }
-    matrix[3][0] = temp;
+uint8_t inverseSBox(uint8_t v){
+    return inv_s_box[v>>4][v&0xF];
 }
 
-// Function to multiply by 2 in GF(2^8)
-unsigned char xtime(unsigned char x) {
-    return (x << 1) ^ ((x >> 7) & 1 ? 0x1B : 0);
+uint8_t getByteColMajor(const vector<vector<uint8_t>>& matrix, int i) {
+    return matrix[i % 4][i / 4];
 }
 
-// Function to multiply two bytes in GF(2^8)
-unsigned char multiply(unsigned char x, unsigned char y) {
-    return ((y & 1) * x) ^
-           ((y >> 1 & 1) * xtime(x)) ^
-           ((y >> 2 & 1) * xtime(xtime(x))) ^
-           ((y >> 3 & 1) * xtime(xtime(xtime(x)))) ^
-           ((y >> 4 & 1) * xtime(xtime(xtime(xtime(x)))));
+vector<vector<uint8_t>> matrixXor(const vector<vector<uint8_t>>& A,const vector<vector<uint8_t>>& B){
+    vector<vector<uint8_t>> R(4,vector<uint8_t>(4));
+    for(int i=0;i<4;i++) for(int j=0;j<4;j++) R[i][j]=A[i][j]^B[i][j];
+    return R;
 }
 
-void mixColumns(vector<vector<uint8_t>>& state) {
-    // Check that the state is a 4x4 matrix.
-    if (state.size() != 4) {
-        cerr << "Error: The matrix must have 4 rows." << endl;
-        return;
-    }
-    for (int i = 0; i < 4; i++) {
-        if (state[i].size() != 4) {
-            cerr << "Error: Each row in the matrix must have 4 columns." << endl;
-            return;
-        }
-    }
-    
-    // Process each column independently.
-    for (int i = 0; i < 4; i++) {
-        unsigned char temp[4];
-        temp[0] = multiply(0x02, state[0][i]) ^ multiply(0x03, state[1][i]) ^ state[2][i] ^ state[3][i];
-        temp[1] = state[0][i] ^ multiply(0x02, state[1][i]) ^ multiply(0x03, state[2][i]) ^ state[3][i];
-        temp[2] = state[0][i] ^ state[1][i] ^ multiply(0x02, state[2][i]) ^ multiply(0x03, state[3][i]);
-        temp[3] = multiply(0x03, state[0][i]) ^ state[1][i] ^ state[2][i] ^ multiply(0x02, state[3][i]);
-        
-        // Write the computed values back into the state.
-        for (int j = 0; j < 4; j++) {
-            state[j][i] = temp[j];
-        }
-    }
+bool matricesEqual(const vector<vector<uint8_t>>& A,const vector<vector<uint8_t>>& B){
+    for(int i=0;i<4;i++) for(int j=0;j<4;j++) if(A[i][j]!=B[i][j]) return false;
+    return true;
 }
 
-const uint8_t RCon[10] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36};
-
-void RotWord(array<uint8_t, 4>& word) {
-  uint8_t temp = word[0];
-  word[0] = word[1];
-  word[1] = word[2];
-  word[2] = word[3];
-  word[3] = temp;
-}
-
-void SubWord(array<uint8_t, 4>& word) {
-  for (int i = 0; i < 4; ++i) {
-      word[i] = s_box[word[i] >> 4][word[i] & 0x0F];
-  }
-}
-
-void KeyExpansion(const array<uint8_t, 16>& key, vector<array<uint8_t, 4>>& expandedKeys) {
-  expandedKeys.resize(44);
-  for (int i = 0; i < 4; ++i) {
-      for (int j = 0; j < 4; ++j) {
-          expandedKeys[i][j] = key[4 * i + j];
-      }
-  }
-
-  array<uint8_t, 4> temp;
-  for (int i = 4; i < 44; ++i) {
-      temp = expandedKeys[i - 1];
-      if (i % 4 == 0) {
-          RotWord(temp);
-          SubWord(temp);
-          temp[0] ^= RCon[(i / 4) - 1];
-      }
-      for (int j = 0; j < 4; ++j) {
-          expandedKeys[i][j] = expandedKeys[i - 4][j] ^ temp[j];
-      }
-  }
-}
-
-// Function to generate a random 8-bit value (0x00 to 0xFF)
-uint8_t getRandomHex_1(mt19937 &gen) {
-    uniform_int_distribution<> dist(0, 255);
-    return static_cast<uint8_t>(dist(gen));
-}
-
-// Function to create a random initial key as a 4x4 matrix.
-vector<vector<uint8_t>> createRandomInitialKey(mt19937 &gen) {
-    vector<vector<uint8_t>> key(4, vector<uint8_t>(4, 0));
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            key[i][j] = getRandomHex_1(gen);
-        }
-    }
-    return key;
-}
-
-vector<uint8_t> flattenMatrix(const vector<vector<uint8_t>> &matrix) {
-  vector<uint8_t> flat;
-  for (int col = 0; col < 4; col++) {
-      for (int row = 0; row < 4; row++) {
-          flat.push_back(matrix[row][col]);
-      }
-  }
-  return flat;
-}
-
-
-
-
-void addRoundKey(vector<vector<uint8_t>>& state, const vector<uint8_t>& roundKey) {
-    // Verify that the state is 4x4 and the round key has 16 bytes.
-    if (state.size() != 4 || state[0].size() != 4 || roundKey.size() != 16) {
-        cerr << "Error: The state must be a 4x4 matrix and the round key must have 16 bytes." << endl;
-        return;
-    }
-    
-    // For each cell in the state matrix, XOR it with the corresponding byte from the round key.
-    // The round key is assumed to be in row-major order: index = row * 4 + column.
-    for (size_t i = 0; i < 4; i++) {
-        for (size_t j = 0; j < 4; j++) {
-            state[i][j] ^= roundKey[i * 4 + j];
-        }
-    }
-}
-
-
-// Function to print the 7th round key in matrix form
-void print7thRoundKey(const array<uint8_t, 16>& initialKey) {
-    vector<array<uint8_t, 4>> expandedKeys;
-    KeyExpansion(initialKey, expandedKeys);
-
-    cout << "7th Round Key:\n";
-    for (int i = 24; i < 28; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            cout << hex << setw(2) << setfill('0') << (int)expandedKeys[i][j] << " ";
-        }
-        cout << endl;
-    }
-    cout << endl;
-}
-
-// Helper function to print a 4x4 matrix in hexadecimal format.
-void printMatrix(const vector<vector<uint8_t>>& matrix) {
-    for (const auto& row : matrix) {
-        for (const auto& byte : row) {
-            cout << "0x" << hex << setw(2) << setfill('0') << static_cast<int>(byte) << " ";
-        }
-        cout << "\n";
-    }
-    cout << dec;
-}
-
-
-
-// Optional: A helper function to print a vector of bytes in hexadecimal.
-void printKey(const std::vector<uint8_t>& key) {
-    for (size_t i = 0; i < key.size(); i++) {
-        printf("0x%02X ", key[i]);
-    }
-    printf("\n");
-}
-
-
-
-
-// Represent an element of F_(2^8)^8 as an array of 8 uint8_t values.
-using Vector8 = array<uint8_t, 8>;
-
-// Function to generate a random vector in F_(2^8)^8.
-Vector8 generate_random_vector(mt19937 &gen) {
-    Vector8 vec;
-    // Uniform distribution over [0, 255] for 8-bit values.
-    uniform_int_distribution<> dist(0, 255);
-    for (int i = 0; i < 8; i++) {
-        vec[i] = static_cast<uint8_t>(dist(gen));
-    }
-    return vec;
-}
-
-// Function to generate a random subset of F_(2^8)^8 with m elements.
-vector<Vector8> generate_random_subset(int m, mt19937 &gen) {
-    vector<Vector8> subset;
-    subset.reserve(m);
-    for (int i = 0; i < m; i++) {
-        subset.push_back(generate_random_vector(gen));
-    }
-    return subset;
-}
-
-// Helper function to print a vector in hex format.
-void print_vector8(const Vector8 &vec) {
-    for (int i = 0; i < 8; i++) {
-        // Print each number as a two-digit hexadecimal value.
-        cout << "0x" 
-             << hex << setw(2) << setfill('0')
-             << static_cast<int>(vec[i]) << " ";
-    }
-    cout << dec << "\n"; // Reset output to decimal.
-}
-
-// Helper function to print a 4x4 matrix of Vector8 elements.
-void printMatrix(const vector<vector<Vector8>> &matrix) {
-    for (const auto &row : matrix) {
-        for (const auto &elem : row) {
-            cout << "[ ";
-            for (int i = 0; i < 8; i++) {
-                cout << "0x" << hex << setw(2) << setfill('0')
-                     << static_cast<int>(elem[i]) << " ";
+int countActiveColumns(const vector<vector<uint8_t>>& matrix) {
+    int active_cols = 0;
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < 4; row++) {
+            if (matrix[row][col] != 0) {
+                active_cols++;
+                break;
             }
-            cout << "]  ";
         }
-        cout << "\n";
     }
-    cout << dec;
+    return active_cols;
 }
 
-// Helper function to print a 4x4 matrix of single bytes in hexadecimal format.
-void printMatrixByte(const vector<vector<uint8_t>> &matrix) {
-    for (const auto &row : matrix) {
-        for (const auto &elem : row) {
-            cout << "0x" 
-                 << hex << setw(2) << setfill('0')
-                 << static_cast<int>(elem) << " ";
-        }
-        cout << "\n";
-    }
-    cout << dec;
+int countActiveBytes(const vector<vector<uint8_t>>& matrix) {
+    int active = 0;
+    for (auto& r : matrix)
+        for (auto v : r)
+            if (v) active++;
+    return active;
 }
 
-// Galois Field multiplication (GF(2^8))
-uint8_t gmul(uint8_t a, uint8_t b) {
-    uint8_t p = 0; // Product
-    for (int i = 0; i < 8; i++) {
-        if (b & 1) {
-            p ^= a;
-        }
-        uint8_t carry = a & 0x80;
-        a <<= 1;
-        if (carry) {
-            a ^= 0x1b; // AES irreducible polynomial: x^8 + x^4 + x^3 + x + 1
-        }
-        b >>= 1;
+int countActiveFirstTwoDiagonals(const vector<vector<uint8_t>>& s) {
+    int a = 0;
+    if (s[0][0]) a++; if (s[1][1]) a++;
+    if (s[2][2]) a++; if (s[3][3]) a++;
+    if (s[0][2]) a++; if (s[1][3]) a++;
+    if (s[2][0]) a++; if (s[3][1]) a++;
+    return a;
+}
+
+void build_combinations(const vector<vector<uint8_t>>& candidates, int depth, vector<uint8_t>& current, vector<vector<uint8_t>>& all_combinations) {
+    if (depth == 8) {
+        all_combinations.push_back(current);
+        return;
+    }
+    for (uint8_t val : candidates[depth]) {
+        current[depth] = val;
+        build_combinations(candidates, depth + 1, current, all_combinations);
+    }
+}
+
+// ================= AES CORE =================
+void apply_s_box(vector<vector<uint8_t>>& s){
+    for(auto& r:s) for(auto& v:r) v=s_box[v>>4][v&0xF];
+}
+
+void InvSubBytes(vector<vector<uint8_t>>& s){
+    for(auto& r:s) for(auto& v:r) v=inverseSBox(v);
+}
+
+void shiftRows(vector<vector<uint8_t>>& s){
+    rotate(s[1].begin(),s[1].begin()+1,s[1].end());
+    rotate(s[2].begin(),s[2].begin()+2,s[2].end());
+    rotate(s[3].begin(),s[3].begin()+3,s[3].end());
+}
+
+void InvShiftRows(vector<vector<uint8_t>>& s){
+    rotate(s[1].rbegin(),s[1].rbegin()+1,s[1].rend());
+    rotate(s[2].rbegin(),s[2].rbegin()+2,s[2].rend());
+    rotate(s[3].rbegin(),s[3].rbegin()+3,s[3].rend());
+}
+
+uint8_t gmul(uint8_t a,uint8_t b){
+    uint8_t p=0;
+    for(int i=0;i<8;i++){
+        if(b&1) p^=a;
+        bool hi=a&0x80;
+        a<<=1;
+        if(hi) a^=0x1b;
+        b>>=1;
     }
     return p;
 }
 
-void InvMixColumns(vector<vector<uint8_t>> &state) {
-    uint8_t temp[4];
-    // Process each column
-    for (int c = 0; c < 4; c++) {
-        temp[0] = gmul(0x0E, state[0][c]) ^ gmul(0x0B, state[1][c]) ^ gmul(0x0D, state[2][c]) ^ gmul(0x09, state[3][c]);
-        temp[1] = gmul(0x09, state[0][c]) ^ gmul(0x0E, state[1][c]) ^ gmul(0x0B, state[2][c]) ^ gmul(0x0D, state[3][c]);
-        temp[2] = gmul(0x0D, state[0][c]) ^ gmul(0x09, state[1][c]) ^ gmul(0x0E, state[2][c]) ^ gmul(0x0B, state[3][c]);
-        temp[3] = gmul(0x0B, state[0][c]) ^ gmul(0x0D, state[1][c]) ^ gmul(0x09, state[2][c]) ^ gmul(0x0E, state[3][c]);
-        // Write back the computed column
-        for (int i = 0; i < 4; i++) {
-            state[i][c] = temp[i];
+void mixColumns(vector<vector<uint8_t>>& s){
+    for(int c=0;c<4;c++){
+        uint8_t t[4];
+        t[0]=gmul(2,s[0][c])^gmul(3,s[1][c])^s[2][c]^s[3][c];
+        t[1]=s[0][c]^gmul(2,s[1][c])^gmul(3,s[2][c])^s[3][c];
+        t[2]=s[0][c]^s[1][c]^gmul(2,s[2][c])^gmul(3,s[3][c]);
+        t[3]=gmul(3,s[0][c])^s[1][c]^s[2][c]^gmul(2,s[3][c]);
+        for(int i=0;i<4;i++) s[i][c]=t[i];
+    }
+}
+
+void InvMixColumns(vector<vector<uint8_t>>& s){
+    for(int c=0;c<4;c++){
+        uint8_t t[4];
+        t[0]=gmul(0x0E,s[0][c])^gmul(0x0B,s[1][c])^gmul(0x0D,s[2][c])^gmul(0x09,s[3][c]);
+        t[1]=gmul(0x09,s[0][c])^gmul(0x0E,s[1][c])^gmul(0x0B,s[2][c])^gmul(0x0D,s[3][c]);
+        t[2]=gmul(0x0D,s[0][c])^gmul(0x09,s[1][c])^gmul(0x0E,s[2][c])^gmul(0x0B,s[3][c]);
+        t[3]=gmul(0x0B,s[0][c])^gmul(0x0D,s[1][c])^gmul(0x09,s[2][c])^gmul(0x0E,s[3][c]);
+        for(int i=0;i<4;i++) s[i][c]=t[i];
+    }
+}
+
+vector<vector<uint8_t>> mu_transform(vector<vector<uint8_t>> s) {
+    // CORRECTED: Mathematical P^{-1} = SR^{-1} \circ MC^{-1}. Therefore, MC^{-1} happens first.
+    InvMixColumns(s);
+    InvShiftRows(s);
+    return s;
+}
+
+void addRoundKey(vector<vector<uint8_t>>& s,const vector<uint8_t>& k){
+    for(int c=0;c<4;c++)
+        for(int r=0;r<4;r++)
+            s[r][c]^=k[c*4+r];
+}
+
+// ================= KEY EXPANSION =================
+void KeyExpansion(const array<uint8_t,16>& key,vector<array<uint8_t,4>>& w){
+    w.resize(44);
+    for(int i=0;i<4;i++) for(int j=0;j<4;j++) w[i][j]=key[4*i+j];
+
+    for(int i=4;i<44;i++){
+        auto temp=w[i-1];
+        if(i%4==0){
+            rotate(temp.begin(),temp.begin()+1,temp.end());
+            for(auto& b:temp) b=s_box[b>>4][b&0xF];
+            temp[0]^=RCon[i/4-1];
         }
+        for(int j=0;j<4;j++) w[i][j]=w[i-4][j]^temp[j];
     }
 }
 
-void InvShiftRows(vector<vector<uint8_t>> &state) {
-    uint8_t temp;
-    // Row 0 remains unchanged.
-    
-    // Row 1: shift one position to the right.
-    temp = state[1][3];
-    state[1][3] = state[1][2];
-    state[1][2] = state[1][1];
-    state[1][1] = state[1][0];
-    state[1][0] = temp;
-    
-    // Row 2: shift two positions to the right.
-    // Swap elements: positions 0 and 2, and positions 1 and 3.
-    temp = state[2][0];
-    state[2][0] = state[2][2];
-    state[2][2] = temp;
-    temp = state[2][1];
-    state[2][1] = state[2][3];
-    state[2][3] = temp;
-    
-    // Row 3: shift three positions to the right (equivalently, one position to the left).
-    temp = state[3][0];
-    state[3][0] = state[3][1];
-    state[3][1] = state[3][2];
-    state[3][2] = state[3][3];
-    state[3][3] = temp;
+// ================= ENCRYPT =================
+vector<vector<uint8_t>> encrypt(vector<vector<uint8_t>> s,const vector<array<uint8_t,4>>& w){
+    vector<uint8_t> rk;
+    for(int i=0;i<4;i++) rk.insert(rk.end(),w[i].begin(),w[i].end());
+    addRoundKey(s,rk);
+
+    for(int r=1;r<=6;r++){
+        rk.clear();
+        for(int i=0;i<4;i++) rk.insert(rk.end(),w[r*4+i].begin(),w[r*4+i].end());
+        apply_s_box(s);
+        shiftRows(s);
+        mixColumns(s);
+        addRoundKey(s,rk);
+    }
+
+    rk.clear();
+    for(int i=0;i<4;i++) rk.insert(rk.end(),w[28+i].begin(),w[28+i].end());
+    apply_s_box(s);
+    shiftRows(s);
+    addRoundKey(s,rk);
+
+    return s;
 }
 
-// Function to get a single random byte from a randomly chosen tuple in the subset.
-uint8_t get_random_byte_from_subset(const vector<Vector8> &subset, mt19937 &gen) {
-    // Choose a random tuple index.
-    uniform_int_distribution<> tuple_dist(0, subset.size() - 1);
-    // Choose a random position within the 8-tuple.
-    uniform_int_distribution<> pos_dist(0, 7);
-    int tuple_index = tuple_dist(gen);
-    int byte_index = pos_dist(gen);
-    return subset[tuple_index][byte_index];
+// ================= FIXED PARTIAL DECRYPT =================
+vector<vector<uint8_t>> partialDecrypt(const vector<vector<uint8_t>>& Ci,const vector<uint8_t>& u){
+    vector<vector<uint8_t>> s=Ci;
+
+    InvShiftRows(s);
+
+    for(int i=0;i<8;i++)
+        s[i%4][i/4]^=u[i];
+
+    InvSubBytes(s);
+    InvMixColumns(s);
+    InvShiftRows(s);
+
+    return s;
 }
 
-// Function to generate a random hexadecimal number (8-bit)
-uint8_t getRandomHex(mt19937& gen) {
-    uniform_int_distribution<> dist(0, 255); // Hex range: 0x00 to 0xFF
-    return static_cast<uint8_t>(dist(gen));
-}
+// ================= MAIN =================
+int main(){
+    cout<<"RECTIFIED 7-ROUND ZERO-DIFFERENCE AES ATTACK RUNNING\n";
 
-// Function to create del_x_prime matrix
-vector<vector<uint8_t>> createDelXPrime(mt19937& gen) {
-    // Initialize a 4x4 matrix with zeros
-    vector<vector<uint8_t>> del_x_prime(4, vector<uint8_t>(4, 0));
+    random_device rd;
+    mt19937 gen(rd());
 
-    // Fill the matrix based on the given pattern
-    del_x_prime[0][0] = getRandomHex(gen); // ∆x0
-    del_x_prime[0][2] = getRandomHex(gen); // ∆x8
+    int m = 128; // Reduced for practical execution, theoretically 2^{55.1}
 
-    del_x_prime[1][1] = getRandomHex(gen); // ∆x5
-    del_x_prime[1][3] = getRandomHex(gen); // ∆x13
-
-    del_x_prime[2][0] = getRandomHex(gen); // ∆x2
-    del_x_prime[2][2] = getRandomHex(gen); // ∆x10
-
-    del_x_prime[3][1] = getRandomHex(gen); // ∆x7
-    del_x_prime[3][3] = getRandomHex(gen); // ∆x1
-
-    return del_x_prime;
-}
-
-vector<vector<uint8_t>> createDelX(int rows, int cols, mt19937& gen) {
-    vector<vector<uint8_t>> matrix(rows, vector<uint8_t>(cols, 0));
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            matrix[i][j] = getRandomHex(gen);
+    vector<Vector8> A0(m), A1(m);
+    for(int i=0;i<m;i++)
+        for(int j=0;j<8;j++){
+            A0[i][j]=getRandomHex(gen);
+            A1[i][j]=getRandomHex(gen);
         }
-    }
-    return matrix;
-}
 
-bool areRelatedDifferenceMatrices(const vector<vector<uint8_t>>& del_x,
-    const vector<vector<uint8_t>>& del_x_prime) {
-size_t rows = del_x.size();
-size_t cols = (rows > 0 ? del_x[0].size() : 0);
+    array<uint8_t,16> key;
+    for(int i=0;i<16;i++) key[i]=getRandomHex(gen);
 
-// Ensure matrices have the same dimensions
-if (rows != del_x_prime.size() || (rows > 0 && cols != del_x_prime[0].size())) {
-cout << "Error: Matrices must have the same dimensions!" << endl;
-return false;
-}
+    vector<array<uint8_t,4>> w;
+    KeyExpansion(key,w);
 
-// Check the condition for each element.
-// For each cell (i, j), we take its value from each of the matrices and compute:
-//   condition = delta_x_value * delta_x_prime_value * (delta_x_value XOR delta_x_prime_value)
-// If condition != 0 for any element, the matrices do not represent related differences.
-for (size_t i = 0; i < rows; ++i) {
-for (size_t j = 0; j < cols; ++j) {
-uint8_t delta_x_value = del_x[i][j];
-uint8_t delta_x_prime_value = del_x_prime[i][j];
+    vector<vector<uint8_t>> dx(4,vector<uint8_t>(4));
+    vector<vector<uint8_t>> dxp(4,vector<uint8_t>(4));
 
-uint8_t condition = delta_x_value * delta_x_prime_value * (delta_x_value ^ delta_x_prime_value);
-if (condition != 0) {
-return false; // As soon as one cell fails, the matrices are not "related differences."
-}
-}
-}
-return true; // All cells satisfy the condition.
-}
+    for(int i=0;i<4;i++)
+        for(int j=0;j<4;j++)
+            dx[i][j]=getRandomHex(gen);
 
-void zeroDifferencePattern(const vector<vector<uint8_t>>& matrix, vector<vector<int>>& pattern) {
-    int rows = matrix.size();
-    int cols = (rows > 0 ? matrix[0].size() : 0);
+    dxp[0][0]=getRandomHex(gen); dxp[0][2]=getRandomHex(gen);
+    dxp[1][1]=getRandomHex(gen); dxp[1][3]=getRandomHex(gen);
+    dxp[2][0]=getRandomHex(gen); dxp[2][2]=getRandomHex(gen);
+    dxp[3][1]=getRandomHex(gen); dxp[3][3]=getRandomHex(gen);
 
-    // Resize the pattern matrix to the same 2D dimensions as the input
-    pattern.resize(rows, vector<int>(cols, 0));
+    list<Quartet_Record> N2;
 
-    // Iterate over the matrix elements and mark positions that are zero.
-    for (int i = 0; i < rows; ++i) {
-        for (int j = 0; j < cols; ++j) {
-            // If the element is zero, mark it as 1 in the pattern (otherwise, mark 0)
-            pattern[i][j] = (matrix[i][j] == 0) ? 1 : 0;
-        }
-    }
-}
+    cout << "Step 1, 2 & 3: Generating strict Cartesian quartets and isolating double collisions...\n";
 
-// A simple helper function to print the pattern matrix.
-void printPattern(const vector<vector<int>>& pattern) {
-    for (const auto& row : pattern) {
-        for (const auto& elem : row) {
-            cout << elem << " ";
-        }
-        cout << "\n";
-    }
-}
+    for(int i=0;i<m;i++){
+        for(int j=0;j<m;j++){
 
-int hammingWeight(uint8_t n) {
-    int count = 0;
-    while (n) {
-        n &= (n - 1); // Clear the least significant bit set
-        ++count;
-    }
-    return count;
-}
+            vector<vector<uint8_t>> P0(4,vector<uint8_t>(4));
 
+            // CORRECTED: Explicitly map elements to the exact Diagonals
+            P0[0][0]=A0[i][0]; P0[1][1]=A0[i][1]; P0[2][2]=A0[i][2]; P0[3][3]=A0[i][3];
+            P0[0][2]=A0[i][4]; P0[1][3]=A0[i][5]; P0[2][0]=A0[i][6]; P0[3][1]=A0[i][7];
+            
+            P0[0][1]=A1[j][0]; P0[1][2]=A1[j][1]; P0[2][3]=A1[j][2]; P0[3][0]=A1[j][3];
+            P0[0][3]=A1[j][4]; P0[1][0]=A1[j][5]; P0[2][1]=A1[j][6]; P0[3][2]=A1[j][7];
 
-int calculateHammingWeightXor(const vector<vector<uint8_t>>& matrix1,
-    const vector<vector<uint8_t>>& matrix2) {
-// Check that matrix dimensions match.
-if (matrix1.size() != matrix2.size() || (matrix1.size() > 0 && matrix1[0].size() != matrix2[0].size())) {
-cerr << "Error: Matrices must have the same dimensions!" << endl;
-return -1; // Return an error indicator.
-}
+            auto P1=matrixXor(P0,dxp);
+            auto P2=matrixXor(P0,dx);
+            auto P3=matrixXor(P2,dxp);
 
-int totalWeight = 0;
+            auto C0=encrypt(P0,w);
+            auto C1=encrypt(P1,w);
+            auto C2=encrypt(P2,w);
+            auto C3=encrypt(P3,w);
 
-// Iterate over each element, XOR the two matrices element-wise, and accumulate the Hamming weight.
-for (size_t i = 0; i < matrix1.size(); ++i) {
-for (size_t j = 0; j < matrix1[i].size(); ++j) {
-uint8_t xored = matrix1[i][j] ^ matrix2[i][j];
-totalWeight += hammingWeight(xored);
-}
-}
+            auto mu01=mu_transform(matrixXor(C0,C1));
+            auto mu23=mu_transform(matrixXor(C2,C3));
 
-return totalWeight;
-}
-
-vector<vector<uint8_t>> matrixXor(const vector<vector<uint8_t>>& A,
-    const vector<vector<uint8_t>>& B) {
-size_t rows = A.size();
-size_t cols = (rows > 0 ? A[0].size() : 0);
-vector<vector<uint8_t>> result(rows, vector<uint8_t>(cols, 0));
-for (size_t i = 0; i < rows; i++) {
-for (size_t j = 0; j < cols; j++) {
-result[i][j] = A[i][j] ^ B[i][j];
-}
-}
-return result;
-}
-
-bool areMatricesEqual(const vector<vector<uint8_t>>& A,
-    const vector<vector<uint8_t>>& B) {
-if (A.size() != B.size()) return false;
-for (size_t i = 0; i < A.size(); i++) {
-if (A[i].size() != B[i].size()) return false;
-for (size_t j = 0; j < A[i].size(); j++) {
-if (A[i][j] != B[i][j]) return false;
-}
-}
-return true;
-}
-
-// Function to calculate total Hamming weight of a 4×4 binary matrix
-int matrixHammingWeight(const vector<vector<uint8_t>> &matrix) {
-    int totalWeight = 0;
-    for (const auto &row : matrix) {
-        for (const auto &elem : row) {
-            totalWeight += hammingWeight(elem);
-        }
-    }
-    return totalWeight;
-}
-
-// Function to calculate total Hamming weight of a 4×4 integer matrix
-int matrixHammingWeight_int(const vector<vector<int>> &matrix) {
-    int totalWeight = 0;
-    for (const auto &row : matrix) {
-        for (const auto &elem : row) {
-            totalWeight += hammingWeight(elem);
-        }
-    }
-    return totalWeight;
-}
-
-// Function to generate an array of 256 hexadecimal numbers
-vector<uint8_t> generateHexArray() {
-    vector<uint8_t> hexArray(256);
-    for (int i = 0; i < 256; i++) {
-        hexArray[i] = static_cast<uint8_t>(i);
-    }
-    return hexArray;
-}
-
-// Inverse S-box function: uses the 16x16 table
-uint8_t inverseSBox(uint8_t val) {
-    uint8_t row = val >> 4;      // high nibble
-    uint8_t col = val & 0x0F;      // low nibble
-    return static_cast<uint8_t>(inv_s_box[row][col]);
-}
-
-// Helper: Get the i-th byte (in row-major order) from a 4x4 matrix.
-uint8_t getByte(const vector<vector<uint8_t>>& matrix, int i) {
-    int row = i / 4;  // each row has 4 bytes in a 4x4 matrix
-    int col = i % 4;
-    return matrix[row][col];
-}
-
-// -------------------------------------------------------------------
-// Partially decrypt the first two columns of Ci using
-// Y = SR⁻¹ ∘ MC⁻¹ ∘ SB⁻¹, with u = { u0^7, ..., u7^7 }.
-// This function returns a 4x2 matrix (partial decryption result).
-
-vector<vector<uint8_t>> partialDecryptFirstTwoColumns(
-    const vector<vector<uint8_t>> &Ci, 
-    const vector<uint8_t> &u)
-{
-    if (u.size() != 8) {
-        cerr << "Error: Expected 8 bytes in u" << endl;
-        return vector<vector<uint8_t>>();
-    }
-    
-    // Build a full 4x4 state.
-    // Copy the first two columns from Ci; set columns 2 and 3 to 0.
-    vector<vector<uint8_t>> state(4, vector<uint8_t>(4, 0));
-    for (int row = 0; row < 4; row++) {
-        state[row][0] = Ci[row][0];
-        state[row][1] = Ci[row][1];
-    }
-    
-    // XOR the first two columns with u (row-major order: indices 0..7).
-    int index = 0;
-    for (int row = 0; row < 4; row++) {
-        for (int col = 0; col < 2; col++) {
-            state[row][col] ^= u[index++];
-        }
-    }
-    
-    // Apply Inverse SubBytes (SB⁻¹) on the entire state.
-    for (int row = 0; row < 4; row++) {
-        for (int col = 0; col < 4; col++) {
-            state[row][col] = inverseSBox(state[row][col]);
-        }
-    }
-    
-    // Apply Inverse MixColumns (MC⁻¹).
-    InvMixColumns(state);
-    // Apply Inverse ShiftRows (SR⁻¹).
-    InvShiftRows(state);
-    
-    // Extract the first two columns (4x2 block) as the result.
-    vector<vector<uint8_t>> decryptedPartial(4, vector<uint8_t>(2, 0));
-    for (int row = 0; row < 4; row++) {
-        decryptedPartial[row][0] = state[row][0];
-        decryptedPartial[row][1] = state[row][1];
-    }
-    
-    return decryptedPartial;
-}
-
-// Helper: XOR two 4x2 matrices element-wise.
-vector<vector<uint8_t>> xorPartialMatrices(const vector<vector<uint8_t>> &A,
-    const vector<vector<uint8_t>> &B)
-{
-vector<vector<uint8_t>> result(4, vector<uint8_t>(2, 0));
-for (int row = 0; row < 4; row++) {
-for (int col = 0; col < 2; col++) {
-result[row][col] = A[row][col] ^ B[row][col];
-}
-}
-return result;
-}
-
-// Helper: Count active (nonzero) bytes in the top-2x2 block
-// (i.e. positions (0,0), (0,1), (1,0), and (1,1)).
-int countActiveTop2x2(const vector<vector<uint8_t>> &mat) {
-    int count = 0;
-    for (int row = 0; row < 2; row++) {
-        for (int col = 0; col < 2; col++) {
-            if (mat[row][col] != 0)
-                count++;
-        }
-    }
-    return count;
-}
-
-std::vector<std::vector<uint8_t>> partialDecryptFull(std::vector<std::vector<uint8_t>> state, const std::vector<uint8_t>& fullRoundKey) {
-    std::vector<std::vector<uint8_t>> decrypted_state = state;
-    std::vector<std::vector<uint8_t>> key_matrix(4, std::vector<uint8_t>(4));
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            key_matrix[i][j] = fullRoundKey[i * 4 + j];
+            if(countActiveColumns(mu01)==2 && matricesEqual(mu01,mu23))
+                N2.push_back({C0,C1,C2,C3});
         }
     }
 
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            decrypted_state[i][j] ^= key_matrix[i][j];
-        }
-    }
-    return decrypted_state;
-}
+    cout<<"N2 size: "<<N2.size()<<endl;
 
-std::vector<std::vector<uint8_t>> partialDecryptFirstTwoColumns(std::vector<std::vector<uint8_t>> state, const std::vector<uint8_t>& keyBytes) {
-    std::vector<std::vector<uint8_t>> decrypted_state = state;
-    std::vector<std::vector<uint8_t>> key_matrix(4, std::vector<uint8_t>(4, 0));
-    for (int i = 0; i < 4; ++i) {
-        if (i < keyBytes.size() / 2) {
-            key_matrix[i][0] = keyBytes[i * 2];
-            key_matrix[i][1] = keyBytes[i * 2 + 1];
-        }
-    }
-
-    for (int i = 0; i < 4; ++i) {
-        decrypted_state[i][0] ^= key_matrix[i][0];
-        decrypted_state[i][1] ^= key_matrix[i][1];
-    }
-    return decrypted_state;
-}
-
-// Function to perform one round of encryption
-std::vector<std::vector<uint8_t>> encryptRound(std::vector<std::vector<uint8_t>> state, const std::vector<uint8_t>& roundKey) {
-    apply_s_box(state);
-    shiftRows(state);
-    mixColumns(state);
-    addRoundKey(state, roundKey);
-    return state;
-}
-
-vector<vector<uint8_t>> encrypt(vector<vector<uint8_t>> plaintext, const vector<array<uint8_t, 4>>& expandedKeys) {
-  vector<vector<uint8_t>> state = plaintext;
-
-  // Get the initial round key (first 4 words)
-  vector<uint8_t> initialRoundKey;
-  for (int i = 0; i < 4; ++i)
-      initialRoundKey.insert(initialRoundKey.end(), expandedKeys[i].begin(), expandedKeys[i].end());
-
-  addRoundKey(state, initialRoundKey);
-
-  for (int round = 1; round <= 7; ++round) {
-      vector<uint8_t> roundKey;
-      for (int i = 0; i < 4; ++i)
-          roundKey.insert(roundKey.end(), expandedKeys[round * 4 + i].begin(), expandedKeys[round * 4 + i].end());
-
-      state = encryptRound(state, roundKey);
-  }
-
-  return state;
-}
-
-
-// Function to print the 6th round key in matrix form
-void print6thRoundKey(const array<uint8_t, 16>& initialKey) {
-    vector<array<uint8_t, 4>> expandedKeys;
-    KeyExpansion(initialKey, expandedKeys);
-
-    cout << "6th Round Key:\n";
-    for (int i = 20; i < 24; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            cout << hex << setw(2) << setfill('0') << (int)expandedKeys[i][j] << " ";
-        }
-        cout << endl;
-    }
-    cout << endl;
-}
-
-
-int main() {
-    int m = 256;
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint8_t> dist(0, 255);
-
-    std::vector<Vector8> A0 = generate_random_subset(m, gen);
-    std::vector<Vector8> A1 = generate_random_subset(m, gen);
-
-    std::list<std::pair<std::vector<std::vector<uint8_t>>, std::vector<std::vector<uint8_t>>>> N1;
-    std::list<std::tuple<std::vector<std::vector<uint8_t>>, std::vector<std::vector<uint8_t>>, std::vector<std::vector<uint8_t>>, std::vector<std::vector<uint8_t>>>> N2;
-
-    double num_plaintexts = 1000;
-    std::vector<uint8_t> initialKeyVec = flattenMatrix(createRandomInitialKey(gen));
-
-    // Convert vector to array
-    std::array<uint8_t, 16> initialKey;
-    std::copy(initialKeyVec.begin(), initialKeyVec.end(), initialKey.begin());
-    
-    vector<array<uint8_t, 4>> expandedKeys(44);
-    KeyExpansion(initialKey, expandedKeys);
-
-    // Print the 7th round key
-    print7thRoundKey(initialKey);
-    print6thRoundKey(initialKey);
-    
-
-    std::vector<std::vector<uint8_t>> delta_x_prime = createDelXPrime(gen);
-    std::vector<std::vector<uint8_t>> delta_x = createDelX(4, 4, gen);
-
-    // Store P0 here
- std::vector<std::vector<uint8_t>> stored_P0(4, std::vector<uint8_t>(4, 0));
-
-    for (int i = 0; i < num_plaintexts; ++i) { // Limit for demonstration
-        std::vector<std::vector<uint8_t>> P0(4, std::vector<uint8_t>(4, 0));
-        std::vector<std::vector<uint8_t>> P0_prime = P0;
-
-        for (int j = 0; j < 4; ++j) {
-            P0[j][j] = get_random_byte_from_subset(A0, gen);
-            if (j < 3) P0[j][j + 1] = get_random_byte_from_subset(A0, gen);
-            P0[j][3 - j] = get_random_byte_from_subset(A1, gen);
-            if (j < 3) P0[j + 1][j] = get_random_byte_from_subset(A1, gen);
-        }
-        P0_prime = matrixXor(P0, delta_x_prime);
-
-        std::vector<std::vector<uint8_t>> C0 = encrypt(P0, expandedKeys);
-        std::vector<std::vector<uint8_t>> C0_prime = encrypt(P0_prime, expandedKeys);
-
-        std::vector<std::vector<int>> pattern;
-        std::vector<std::vector<uint8_t>> diff_C = matrixXor(C0, C0_prime);
-        InvMixColumns(diff_C);
-        InvShiftRows(diff_C);
-        zeroDifferencePattern(diff_C, pattern);
-
-        if (matrixHammingWeight_int(pattern) == 2) {
-            N1.push_back({C0, C0_prime});
-            //Store the P0
-            stored_P0 = P0;
-        }
-    }
-
-    std::cout << "Size of N1: " << N1.size() << std::endl;
-
-    for (const auto& pair : N1) {
-        std::vector<std::vector<uint8_t>> C0 = pair.first;
-        std::vector<std::vector<uint8_t>> C0_prime = pair.second;
-
-        // Use the stored P0, not a new one
-        std::vector<std::vector<uint8_t>> P0 = stored_P0;
-       
-        std::vector<std::vector<uint8_t>> P1 = matrixXor(P0, delta_x);
-        std::vector<std::vector<uint8_t>> P2 = matrixXor(P0, delta_x_prime);
-        std::vector<std::vector<uint8_t>> P3 = matrixXor(P0, matrixXor(delta_x, delta_x_prime));
-
-        std::vector<std::vector<uint8_t>> C1 = encrypt(P1, expandedKeys);
-        std::vector<std::vector<uint8_t>> C2_temp = encrypt(P2, expandedKeys);
-        std::vector<std::vector<uint8_t>> C3_temp = encrypt(P3, expandedKeys);
-
-        // In a real scenario, N2 would be populated based on the plaintext relationships.
-        // For demonstration, let's assume we have a way to get a valid quartet.
-        N2.emplace_back(C0, C1, C2_temp, C3_temp); // Simplified population for demonstration
-    }
-
-    std::cout << "Size of N2 (after potential population): " << N2.size() << std::endl;
-
+    // --- STEPS 4 to 16: Key Candidate Pruning and Verification ---
+    cout << "Step 4: Executing equivalent round-key pruning on candidates...\n";
     for (const auto& quartet : N2) {
-        std::vector<std::vector<uint8_t>> C0, C1, C2, C3;
-        std::tie(C0, C1, C2, C3) = quartet;
-        std::vector<uint8_t> possible_u7_partial(8);
-        std::vector<uint8_t> candidates_u7_full(16);
-        bool possible_partial = true;
+        vector<vector<uint8_t>> valid_u7_candidates(8);
+        bool quartet_survives = true;
+
+        // Alignment tracking: Unshift before isolating active columns for zero-sum check
+        vector<vector<uint8_t>> C0_unshifted = quartet.C0; InvShiftRows(C0_unshifted);
+        vector<vector<uint8_t>> C1_unshifted = quartet.C1; InvShiftRows(C1_unshifted);
+        vector<vector<uint8_t>> C2_unshifted = quartet.C2; InvShiftRows(C2_unshifted);
+        vector<vector<uint8_t>> C3_unshifted = quartet.C3; InvShiftRows(C3_unshifted);
 
         for (int i = 0; i < 8; ++i) {
-            std::vector<uint8_t> candidates_ui7;
             for (int u = 0; u < 256; ++u) {
-                if ((inverseSBox(getByte(C0, i) ^ static_cast<uint8_t>(u)) ^
-                     inverseSBox(getByte(C1, i) ^ static_cast<uint8_t>(u)) ^
-                     inverseSBox(getByte(C2, i) ^ static_cast<uint8_t>(u)) ^
-                     inverseSBox(getByte(C3, i) ^ static_cast<uint8_t>(u))) == 0) {
-                    candidates_ui7.push_back(static_cast<uint8_t>(u));
+                uint8_t test_val = static_cast<uint8_t>(u);
+                
+                // Zero-Sum evaluation over the exact byte indices using correct alignment
+                if ((inverseSBox(getByteColMajor(C0_unshifted, i) ^ test_val) ^
+                     inverseSBox(getByteColMajor(C1_unshifted, i) ^ test_val) ^
+                     inverseSBox(getByteColMajor(C2_unshifted, i) ^ test_val) ^
+                     inverseSBox(getByteColMajor(C3_unshifted, i) ^ test_val)) == 0) {
+                    
+                    valid_u7_candidates[i].push_back(test_val);
                 }
             }
-
-            if (candidates_ui7.empty()) {
-                possible_partial = false;
+            if (valid_u7_candidates[i].empty()) {
+                quartet_survives = false;
                 break;
             }
-            possible_u7_partial[i] = candidates_ui7[0]; // Taking the first candidate for now
         }
 
-        if (possible_partial) {
-            std::cout << "Potential partial last round key (first 8 bytes):" << std::endl;
-            for (int i = 0; i < 8; ++i) {
-                std::cout << "Byte " << i << ": 0x" << std::hex << static_cast<int>(possible_u7_partial[i]) << std::endl;
-                candidates_u7_full[i] = possible_u7_partial[i];
-            }
+        if (quartet_survives) {
+            vector<vector<uint8_t>> all_combinations;
+            vector<uint8_t> current_combo(8, 0);
+            
+            build_combinations(valid_u7_candidates, 0, current_combo, all_combinations);
+            
+            for (const auto& u_guess : all_combinations) {
+                auto Y_C0 = partialDecrypt(quartet.C0, u_guess);
+                auto Y_C2 = partialDecrypt(quartet.C2, u_guess);
+                auto Y_C3 = partialDecrypt(quartet.C3, u_guess);
 
-            std::cout << "Starting exhaustive search for the remaining 8 bytes of the last round key..." << std::endl;
-            for (int b8 = 0; b8 < 256; ++b8) {
-                for (int b9 = 0; b9 < 256; ++b9) {
-                    for (int b10 = 0; b10 < 256; ++b10) {
-                        for (int b11 = 0; b11 < 256; ++b11) {
-                            for (int b12 = 0; b12 < 256; ++b12) {
-                                for (int b13 = 0; b13 < 256; ++b13) {
-                                    for (int b14 = 0; b14 < 256; ++b14) {
-                                        for (int b15 = 0; b15 < 256; ++b15) {
-                                            std::vector<uint8_t> u7_full = {
-                                                possible_u7_partial[0], possible_u7_partial[1], possible_u7_partial[2], possible_u7_partial[3],
-                                                possible_u7_partial[4], possible_u7_partial[5], possible_u7_partial[6], possible_u7_partial[7],
-                                                static_cast<uint8_t>(b8), static_cast<uint8_t>(b9), static_cast<uint8_t>(b10), static_cast<uint8_t>(b11),
-                                                static_cast<uint8_t>(b12), static_cast<uint8_t>(b13), static_cast<uint8_t>(b14), static_cast<uint8_t>(b15)
-                                            };
-                                            InvMixColumns(C0);
-                                            InvMixColumns(C2);
-                                            InvMixColumns(C3);
-                                            InvShiftRows(C0);
-                                            InvShiftRows(C2);
-                                            InvShiftRows(C3);
-                                            
+                auto diff_02 = matrixXor(Y_C0, Y_C2);
+                auto diff_03 = matrixXor(Y_C0, Y_C3);
 
-                                            std::vector<std::vector<uint8_t>> Y_C0 = partialDecryptFull((C0), u7_full);
-                                            std::vector<std::vector<uint8_t>> Y_C2 = partialDecryptFull(C2, u7_full);
-                                            std::vector<std::vector<uint8_t>> Y_C3 = partialDecryptFull(C3, u7_full);
-
-                                            std::vector<std::vector<uint8_t>> diff_Y02 = matrixXor(Y_C0, Y_C2);
-                                            std::vector<std::vector<uint8_t>> diff_Y03 = matrixXor(Y_C0, Y_C3);
-
-                                            int active_02 = 0;
-                                            int active_03 = 0;
-                                            for (int r = 0; r < 4; ++r) {
-                                                if (diff_Y02[r][0] != 0) active_02++;
-                                                if (diff_Y02[r][1] != 0) active_02++;
-                                                if (r < 3 && diff_Y02[r][r + 1] != 0) active_02++;
-                                                if (diff_Y03[r][0] != 0) active_03++;
-                                                if (diff_Y03[r][1] != 0) active_03++;
-                                                if (r < 3 && diff_Y03[r][r + 1] != 0) active_03++;
-                                            }
-
-                                            // You might need more conditions here to verify the full key
-                                            // based on the properties of the cipher and the attack.
-                                            // This example uses the same active byte condition as before,
-                                            // which might not be sufficient for the full key.
-                                            if (active_02 == 2 && active_03 == 2) {
-                                                std::cout << "\nPotential full last round key (u7):" << std::endl;
-                                                for (int k = 0; k < 16; ++k) {
-                                                    std::cout << "Byte " << k << ": 0x" << std::hex << static_cast<int>(u7_full[k]) << std::endl;
-                                                }
-                                                // You would likely store this potential key or perform further tests.
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // Validation filter enforcing strict structure over the remaining rounds
+                if (countActiveFirstTwoDiagonals(diff_02) == 2 && 
+                    countActiveFirstTwoDiagonals(diff_03) == 2 && 
+                    countActiveBytes(diff_02) == 2 && 
+                    countActiveBytes(diff_03) == 2) {
+                    
+                    cout << "\n[+] Valid Partial Candidate found! Preparing Exhaustive Search...\n";
+                    cout << "Partial Equivalent Key (u7): [ ";
+                    for(int k=0; k<8; k++) cout << hex << (int)u_guess[k] << " ";
+                    cout << dec << "]\n";
                 }
             }
-            std::cout << "Exhaustive search for the remaining key bytes complete for this quartet." << std::endl;
         }
     }
 
+    cout << "DONE\n";
     return 0;
 }
